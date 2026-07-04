@@ -83,11 +83,16 @@ def name_similarity(a, b):
     return difflib.SequenceMatcher(None, a.lower(), b.lower()).ratio()
 
 
-def fetch_events(sport):
+MIN_SINGLE_NAME_SIMILARITY = 0.5  # kedua nama tim WAJIB minimal semirip ini masing-masing
+BASKETBALL_LEAGUE = "usa-nba"  # batasin basket cuma NBA
+
+
+def fetch_events(sport, league=None):
+    params = {"apiKey": ODDS_API_KEY, "sport": sport, "status": STATUS_FILTER, "limit": 500}
+    if league:
+        params["league"] = league
     try:
-        r = requests.get(f"{ODDS_BASE_URL}/events", params={
-            "apiKey": ODDS_API_KEY, "sport": sport, "status": STATUS_FILTER, "limit": 500,
-        }, timeout=15)
+        r = requests.get(f"{ODDS_BASE_URL}/events", params=params, timeout=15)
         if r.status_code == 200:
             return r.json()
         print(f"[WARN] Fetch events {sport}: {r.status_code} {r.text[:200]}")
@@ -95,6 +100,13 @@ def fetch_events(sport):
     except requests.RequestException as e:
         print(f"[ERROR] Fetch events {sport}: {e}")
         return []
+
+
+def get_sport_events(sport):
+    """Wrapper -- basket dibatasin ke NBA doang, bola tetap universal (semua liga)."""
+    if sport == "basketball":
+        return fetch_events(sport, league=BASKETBALL_LEAGUE)
+    return fetch_events(sport)
 
 
 def fetch_event_odds(event_id):
@@ -111,17 +123,30 @@ def fetch_event_odds(event_id):
         return None
 
 
+def event_match_score(home_query, away_query, ev):
+    """
+    Return None kalau salah satu nama tim gak cukup mirip (mencegah kasus
+    'Paraguay vs France' ketarik ke 'Turkiye vs France' cuma gara-gara
+    salah satu sisi kebetulan sama persis). Kedua sisi WAJIB lolos ambang
+    minimal masing-masing, baru dirata-rata buat nentuin skor akhir.
+    """
+    home_score = name_similarity(home_query, ev.get("home", ""))
+    away_score = name_similarity(away_query, ev.get("away", ""))
+    if home_score < MIN_SINGLE_NAME_SIMILARITY or away_score < MIN_SINGLE_NAME_SIMILARITY:
+        return None
+    return (home_score + away_score) / 2
+
+
 def find_match_across_sports(home_query, away_query):
     """
-    Cari event yang paling cocok di SEMUA sport (football & basketball).
+    Cari event yang paling cocok di SEMUA sport (football & basketball NBA).
     Return (event, sport) atau (None, None) kalau gak ketemu.
     """
     best_event, best_sport, best_score = None, None, 0
     for sport in SPORTS:
-        for ev in fetch_events(sport):
-            score = (name_similarity(home_query, ev.get("home", "")) +
-                     name_similarity(away_query, ev.get("away", ""))) / 2
-            if score > best_score:
+        for ev in get_sport_events(sport):
+            score = event_match_score(home_query, away_query, ev)
+            if score is not None and score > best_score:
                 best_score, best_event, best_sport = score, ev, sport
     if best_score >= FUZZY_MATCH_THRESHOLD:
         return best_event, best_sport
@@ -262,29 +287,32 @@ def format_football_odds(odds_response):
 
 
 def handle_odds_command(chat_id, query_text):
-    teams = re.split(r"\s+vs\.?\s+|\s+v\s+|\s+-\s+", query_text.strip(), flags=re.IGNORECASE)
-    if len(teams) != 2:
-        send_telegram_message(chat_id, "Format: /odds Home vs Away")
+    match_lines = [l.strip() for l in query_text.splitlines() if l.strip()]
+    if not match_lines:
+        send_telegram_message(chat_id, "Format: /odds Home vs Away\n(bisa banyak baris sekaligus, 1 match per baris)")
         return
 
-    home_query, away_query = teams[0].strip(), teams[1].strip()
-    event, sport = find_match_across_sports(home_query, away_query)
+    for line in match_lines:
+        teams = re.split(r"\s+vs\.?\s+|\s+v\s+|\s+-\s+", line, flags=re.IGNORECASE)
+        if len(teams) != 2:
+            send_telegram_message(chat_id, f"Format salah, dilewati: '{line}'")
+            continue
 
-    if not event:
-        send_telegram_message(chat_id, f"Match '{query_text}' gak ketemu di football atau basketball.")
-        return
+        home_query, away_query = teams[0].strip(), teams[1].strip()
+        event, sport = find_match_across_sports(home_query, away_query)
 
-    odds_response = fetch_event_odds(event["id"])
-    if not odds_response:
-        send_telegram_message(chat_id, "Ketemu match-nya, tapi gagal ambil data odds. Coba lagi bentar.")
-        return
+        if not event:
+            send_telegram_message(chat_id, f"'{line}' gak ketemu di football atau basketball (NBA).")
+            continue
 
-    if sport == "basketball":
-        msg = format_basketball_odds(odds_response)
-    else:
-        msg = format_football_odds(odds_response)
+        odds_response = fetch_event_odds(event["id"])
+        if not odds_response:
+            send_telegram_message(chat_id, f"'{line}' ketemu match-nya, tapi gagal ambil data odds.")
+            continue
 
-    send_telegram_message(chat_id, msg)
+        msg = format_basketball_odds(odds_response) if sport == "basketball" else format_football_odds(odds_response)
+        send_telegram_message(chat_id, msg)
+        time.sleep(0.3)  # jeda dikit biar gak kena rate limit Telegram kalau match-nya banyak
 
 
 # ---------- Bagian hedge advisor (sama seperti v3) ----------
@@ -318,9 +346,8 @@ def parse_position_line(line, default_threshold):
 def find_matching_event(pos, events):
     best_event, best_score = None, 0
     for ev in events:
-        score = (name_similarity(pos["home"], ev.get("home", "")) +
-                 name_similarity(pos["away"], ev.get("away", ""))) / 2
-        if score > best_score:
+        score = event_match_score(pos["home"], pos["away"], ev)
+        if score is not None and score > best_score:
             best_score, best_event = score, ev
     return best_event if best_score >= FUZZY_MATCH_THRESHOLD else None
 
@@ -393,7 +420,7 @@ def evaluate_position(pos, best_hedge_odds):
 def check_positions(state):
     if not state["positions"] or not state["chat_id"]:
         return
-    events_by_sport = {sport: fetch_events(sport) for sport in SPORTS}
+    events_by_sport = {sport: get_sport_events(sport) for sport in SPORTS}
     all_events = [ev for evs in events_by_sport.values() for ev in evs]
     for pos in state["positions"]:
         if pos["notified"]:
