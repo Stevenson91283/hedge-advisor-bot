@@ -150,16 +150,27 @@ def fetch_event_odds(event_id):
 
 def event_match_score(home_query, away_query, ev):
     """
-    Return None kalau salah satu nama tim gak cukup mirip (mencegah kasus
-    'Paraguay vs France' ketarik ke 'Turkiye vs France' cuma gara-gara
-    salah satu sisi kebetulan sama persis). Kedua sisi WAJIB lolos ambang
-    minimal masing-masing, baru dirata-rata buat nentuin skor akhir.
+    Return None kalau kedua ARAH pasangan nama gak ada yang cukup mirip.
+    Cek 2 kemungkinan urutan, karena user bisa aja ketik "Tim B vs Tim A"
+    padahal di data API-nya "home"=Tim A, "away"=Tim B (urutan kebalik gak
+    berarti beda match). Kedua sisi WAJIB lolos ambang minimal masing-masing
+    di SALAH SATU arah -- ini juga yang mencegah kasus 'Paraguay vs France'
+    ketarik ke 'Turkiye vs France' cuma gara-gara satu sisi kebetulan sama.
     """
-    home_score = name_similarity(home_query, ev.get("home", ""))
-    away_score = name_similarity(away_query, ev.get("away", ""))
-    if home_score < MIN_SINGLE_NAME_SIMILARITY or away_score < MIN_SINGLE_NAME_SIMILARITY:
-        return None
-    return (home_score + away_score) / 2
+    ev_home, ev_away = ev.get("home", ""), ev.get("away", "")
+
+    # Arah normal: query_home vs event_home, query_away vs event_away
+    h1 = name_similarity(home_query, ev_home)
+    a1 = name_similarity(away_query, ev_away)
+    direct_score = (h1 + a1) / 2 if (h1 >= MIN_SINGLE_NAME_SIMILARITY and a1 >= MIN_SINGLE_NAME_SIMILARITY) else None
+
+    # Arah kebalik: query_home vs event_away, query_away vs event_home
+    h2 = name_similarity(home_query, ev_away)
+    a2 = name_similarity(away_query, ev_home)
+    swapped_score = (h2 + a2) / 2 if (h2 >= MIN_SINGLE_NAME_SIMILARITY and a2 >= MIN_SINGLE_NAME_SIMILARITY) else None
+
+    candidates = [s for s in (direct_score, swapped_score) if s is not None]
+    return max(candidates) if candidates else None
 
 
 def find_match_across_sports(home_query, away_query, events_by_sport=None):
