@@ -281,14 +281,61 @@ def format_basketball_odds(odds_response):
     return "\n".join(lines)
 
 
+def best_balanced_line(entries, half_line_only=True):
+    """
+    Cari 1 line total gol di mana Over DAN Under dua-duanya paling deket ke 2.0
+    (bukan cari over terbaik & under terbaik terpisah di line yang beda-beda).
+    Return (entry, over_price, under_price) atau None.
+    """
+    candidates = []
+    for entry in entries:
+        if half_line_only and not is_half_line(entry.get("hdp")):
+            continue
+        over, under = entry.get("over"), entry.get("under")
+        if over is None or under is None:
+            continue
+        try:
+            over_price, under_price = float(over), float(under)
+        except (TypeError, ValueError):
+            continue
+        closeness = abs(over_price - 2.0) + abs(under_price - 2.0)
+        candidates.append((closeness, entry, over_price, under_price))
+
+    if not candidates:
+        return None
+    candidates.sort(key=lambda c: c[0])
+    _, entry, over_price, under_price = candidates[0]
+    return entry, over_price, under_price
+
+
+def build_example_score(hdp, home, away, home_odds, away_odds):
+    """
+    Contoh skor ilustrasi: favorit (odds moneyline lebih rendah) dapet hdp
+    dibulatkan ke atas, underdog dapet hdp dibulatkan ke bawah.
+    Line 2.5 -> favorit 3, underdog 2. Cuma ilustrasi, BUKAN prediksi asli.
+    """
+    if home_odds is None or away_odds is None:
+        return None
+    try:
+        home_odds, away_odds = float(home_odds), float(away_odds)
+    except (TypeError, ValueError):
+        return None
+
+    favorite, underdog = (home, away) if home_odds < away_odds else (away, home)
+    hdp_floor = int(hdp)  # hdp selalu X.5, jadi int() = pembulatan ke bawah
+    fav_goals = hdp_floor + 1
+    dog_goals = hdp_floor
+    return f"{favorite} {fav_goals} - {dog_goals} {underdog}"
+
+
 WINNER_KEYWORDS = ["1x2", "winner", "moneyline", "match odds", "full time result",
                    "3 way", "3-way", "fulltime result", "ft result", "ml"]
 
 
 def format_football_odds(odds_response):
     """
-    Format ringkas: W1/Tie/W2 + 1 Over line terbaik + 1 Under line terbaik
-    (odds < 2), per bookmaker -- bukan semua line total gol.
+    Format ringkas: W1/Tie/W2 + 1 line total gol paling balance (Over & Under
+    keduanya deket ke 2) + contoh skor ilustrasi, per bookmaker.
     """
     home, away = odds_response.get("home", "?"), odds_response.get("away", "?")
     lines = [f"⚽ <b>{home} vs {away}</b>"]
@@ -308,24 +355,27 @@ def format_football_odds(odds_response):
             elif "over" in name_lower or "total" in name_lower:
                 totals_entries.extend(market.get("odds", []))
 
+        home_odds, away_odds = None, None
         if winner_entries:
             e = winner_entries[0]
             h, d, a = e.get("home"), e.get("draw"), e.get("away")
             if h is not None and a is not None:
                 draw_txt = f" | Tie {d}" if d is not None else ""
                 bk_lines.append(f"  W1 (menang {home}) {h}{draw_txt} | W2 (menang {away}) {a}")
+                home_odds, away_odds = h, a
         else:
             print(f"[DEBUG] {bk_name} - {home} vs {away}: market W1/Tie/W2 gak ke-detect. "
                   f"Nama market yang ada: {all_market_names}")
 
-        best_over = best_under_2(totals_entries, "over", half_line_only=True)
-        best_under = best_under_2(totals_entries, "under", half_line_only=True)
-        if best_over:
-            price, entry = best_over
-            bk_lines.append(f"  Over terbaik: {price} @ total {entry.get('hdp')} gol")
-        if best_under:
-            price, entry = best_under
-            bk_lines.append(f"  Under terbaik: {price} @ total {entry.get('hdp')} gol")
+        balanced = best_balanced_line(totals_entries, half_line_only=True)
+        if balanced:
+            entry, over_price, under_price = balanced
+            hdp = entry.get("hdp")
+            bk_lines.append(f"  Over {hdp}: {over_price} | Under {hdp}: {under_price}")
+
+            example = build_example_score(hdp, home, away, home_odds, away_odds)
+            if example:
+                bk_lines.append(f"  Contoh skor: {example}")
 
         if bk_lines:
             lines.append(f"\n<b>{bk_name}</b>")
