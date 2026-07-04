@@ -1,0 +1,44 @@
+name: Hedge Advisor Bot
+
+on:
+  schedule:
+    # Jalan tiap 6 jam (00:00, 06:00, 12:00, 18:00 UTC).
+    # Sesi baru selalu mulai pas sesi lama (yang jalan ~5j50m) udah beres,
+    # jadi efeknya cakupan waktu jalan terus-menerus tanpa jeda berarti.
+    - cron: "0 */6 * * *"
+  workflow_dispatch: {}  # biar bisa di-trigger manual dari tab Actions
+
+permissions:
+  contents: write  # perlu ini buat commit balik state.json
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355  # sedikit di bawah limit keras 360 menit (6 jam)
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependency
+        run: pip install requests
+
+      - name: Jalankan bot
+        env:
+          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          BOOKMAKERS: "Bet365,SBOBET"
+        run: python3 hedge_advisor_bot_v3.py
+
+      - name: Commit & push state.json
+        run: |
+          git config user.name "hedge-advisor-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add state.json
+          git diff --staged --quiet || git commit -m "Update state [skip ci]"
+          git push
