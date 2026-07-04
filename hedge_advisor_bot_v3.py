@@ -86,20 +86,45 @@ def name_similarity(a, b):
 MIN_SINGLE_NAME_SIMILARITY = 0.5  # kedua nama tim WAJIB minimal semirip ini masing-masing
 BASKETBALL_LEAGUE = "usa-nba"  # batasin basket cuma NBA
 
+# --- Kontrol jelas biar gak narik/habisin kuota response event tanpa batas ---
+EVENTS_PAGE_SIZE = 5000   # maks per request sesuai limit resmi odds-api.io
+MAX_PAGES_PER_SPORT = 2   # 2 halaman = maks 10.000 event per sport, per fetch
+# Efeknya: worst case cuma 2 API call per sport per fetch (bukan tiap baris
+# /odds, karena events-nya di-cache & dipakai ulang -- lihat handle_odds_command).
+# Naikin MAX_PAGES_PER_SPORT kalau ternyata masih banyak match yang "gak ketemu"
+# padahal beneran ada; turunin kalau mau lebih hemat request.
+
 
 def fetch_events(sport, league=None):
-    params = {"apiKey": ODDS_API_KEY, "sport": sport, "status": STATUS_FILTER, "limit": 500}
-    if league:
-        params["league"] = league
-    try:
-        r = requests.get(f"{ODDS_BASE_URL}/events", params=params, timeout=15)
-        if r.status_code == 200:
-            return r.json()
-        print(f"[WARN] Fetch events {sport}: {r.status_code} {r.text[:200]}")
-        return []
-    except requests.RequestException as e:
-        print(f"[ERROR] Fetch events {sport}: {e}")
-        return []
+    all_events = []
+    skip = 0
+
+    for page_num in range(MAX_PAGES_PER_SPORT):
+        params = {
+            "apiKey": ODDS_API_KEY, "sport": sport, "status": STATUS_FILTER,
+            "limit": EVENTS_PAGE_SIZE, "skip": skip,
+        }
+        if league:
+            params["league"] = league
+        try:
+            r = requests.get(f"{ODDS_BASE_URL}/events", params=params, timeout=15)
+        except requests.RequestException as e:
+            print(f"[ERROR] Fetch events {sport}: {e}")
+            break
+
+        if r.status_code != 200:
+            print(f"[WARN] Fetch events {sport}: {r.status_code} {r.text[:200]}")
+            break
+
+        page = r.json()
+        all_events.extend(page)
+        print(f"[INFO] Fetch events {sport} halaman {page_num + 1}: {len(page)} event")
+
+        if len(page) < EVENTS_PAGE_SIZE:
+            break  # udah halaman terakhir, gak perlu lanjut skip
+        skip += EVENTS_PAGE_SIZE
+
+    return all_events
 
 
 def get_sport_events(sport):
@@ -137,14 +162,20 @@ def event_match_score(home_query, away_query, ev):
     return (home_score + away_score) / 2
 
 
-def find_match_across_sports(home_query, away_query):
+def find_match_across_sports(home_query, away_query, events_by_sport=None):
     """
     Cari event yang paling cocok di SEMUA sport (football & basketball NBA).
+    events_by_sport: kalau udah di-fetch sebelumnya (misal buat proses banyak
+    baris /odds sekaligus), pass di sini biar GAK fetch ulang dari API tiap
+    baris -- hemat request & kuota.
     Return (event, sport) atau (None, None) kalau gak ketemu.
     """
+    if events_by_sport is None:
+        events_by_sport = {sport: get_sport_events(sport) for sport in SPORTS}
+
     best_event, best_sport, best_score = None, None, 0
-    for sport in SPORTS:
-        for ev in get_sport_events(sport):
+    for sport, events in events_by_sport.items():
+        for ev in events:
             score = event_match_score(home_query, away_query, ev)
             if score is not None and score > best_score:
                 best_score, best_event, best_sport = score, ev, sport
@@ -292,6 +323,13 @@ def handle_odds_command(chat_id, query_text):
         send_telegram_message(chat_id, "Format: /odds Home vs Away\n(bisa banyak baris sekaligus, 1 match per baris)")
         return
 
+    # Fetch semua event SEKALI aja di sini, dipakai ulang buat semua baris di
+    # bawah -- biar gak fetch+paginate ulang dari API tiap baris (boros kuota).
+    events_by_sport = {sport: get_sport_events(sport) for sport in SPORTS}
+    print(f"[INFO] /odds: {len(match_lines)} baris query, "
+          f"{sum(len(v) for v in events_by_sport.values())} event ke-cache "
+          f"({', '.join(f'{k}={len(v)}' for k, v in events_by_sport.items())})")
+
     for line in match_lines:
         teams = re.split(r"\s+vs\.?\s+|\s+v\s+|\s+-\s+", line, flags=re.IGNORECASE)
         if len(teams) != 2:
@@ -299,7 +337,7 @@ def handle_odds_command(chat_id, query_text):
             continue
 
         home_query, away_query = teams[0].strip(), teams[1].strip()
-        event, sport = find_match_across_sports(home_query, away_query)
+        event, sport = find_match_across_sports(home_query, away_query, events_by_sport)
 
         if not event:
             send_telegram_message(chat_id, f"'{line}' gak ketemu di football atau basketball (NBA).")
