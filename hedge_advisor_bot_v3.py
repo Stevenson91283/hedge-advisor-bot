@@ -185,7 +185,7 @@ def find_match_across_sports(home_query, away_query, events_by_sport=None):
 
 
 EXCLUDE_KEYWORDS = ["half", "1st", "2nd", "3rd", "4th", "quarter", "period",
-                    "corner", "card", "booking", "team total", "asian total"]
+                    "corner", "card", "booking", "team total", "asian total", " ht"]
 
 
 def is_main_market(name_lower):
@@ -271,7 +271,7 @@ def format_basketball_odds(odds_response):
 
 
 WINNER_KEYWORDS = ["1x2", "winner", "moneyline", "match odds", "full time result",
-                   "3 way", "3-way", "fulltime result", "ft result"]
+                   "3 way", "3-way", "fulltime result", "ft result", "ml"]
 
 
 def format_football_odds(odds_response):
