@@ -481,6 +481,12 @@ def handle_incoming_message(state, message):
                 send_telegram_message(chat_id, f"Threshold default diubah jadi {parts[1]}%.")
             except ValueError:
                 send_telegram_message(chat_id, "Format: /threshold 6")
+        else:
+            send_telegram_message(
+                chat_id,
+                f"Threshold default sekarang: {state['default_threshold']}%.\n"
+                f"Buat ubah, ketik: /threshold 6"
+            )
         return
 
     added = 0
