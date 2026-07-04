@@ -270,6 +270,10 @@ def format_basketball_odds(odds_response):
     return "\n".join(lines)
 
 
+WINNER_KEYWORDS = ["1x2", "winner", "moneyline", "match odds", "full time result",
+                   "3 way", "3-way", "fulltime result", "ft result"]
+
+
 def format_football_odds(odds_response):
     """
     Format ringkas: W1/Tie/W2 + 1 Over line terbaik + 1 Under line terbaik
@@ -282,12 +286,13 @@ def format_football_odds(odds_response):
     for bk_name, markets in bookmakers.items():
         bk_lines = []
         winner_entries, totals_entries = [], []
+        all_market_names = [m.get("name") for m in markets]  # buat debug kalau gagal
 
         for market in markets:
             name_lower = (market.get("name") or "").lower()
             if not is_main_market(name_lower):
                 continue
-            if "1x2" in name_lower or "winner" in name_lower or "moneyline" in name_lower:
+            if any(kw in name_lower for kw in WINNER_KEYWORDS):
                 winner_entries.extend(market.get("odds", []))
             elif "over" in name_lower or "total" in name_lower:
                 totals_entries.extend(market.get("odds", []))
@@ -298,6 +303,9 @@ def format_football_odds(odds_response):
             if h is not None and a is not None:
                 draw_txt = f" | Tie {d}" if d is not None else ""
                 bk_lines.append(f"  W1 (menang {home}) {h}{draw_txt} | W2 (menang {away}) {a}")
+        else:
+            print(f"[DEBUG] {bk_name} - {home} vs {away}: market W1/Tie/W2 gak ke-detect. "
+                  f"Nama market yang ada: {all_market_names}")
 
         best_over = best_under_2(totals_entries, "over", half_line_only=True)
         best_under = best_under_2(totals_entries, "under", half_line_only=True)
@@ -431,7 +439,7 @@ def find_best_hedge_odds(odds_response, pos):
         for bk_name, markets in bookmakers.items():
             for market in markets:
                 name = (market.get("name") or "").lower()
-                if "winner" not in name and "1x2" not in name and "moneyline" not in name:
+                if not any(kw in name for kw in WINNER_KEYWORDS):
                     continue
                 for entry in market.get("odds", []):
                     val = entry.get(target_field)
