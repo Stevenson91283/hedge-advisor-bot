@@ -1,20 +1,17 @@
 """
-Hedge Advisor Bot v3 -- dirancang buat jalan di GitHub Actions
-================================================================
-Sama persis logic-nya kayak v2 (odds-api.io + Telegram), tapi ada
-batas waktu jalan (~5 jam 50 menit) biar cocok sama limit GitHub Actions
-(maks 6 jam per sesi). Workflow-nya bakal auto-restart sesi baru pas
-sesi lama abis, jadi EFEKNYA JALAN TERUS-MENERUS tanpa kamu perlu
-server/VPS/kartu kredit sama sekali.
+Hedge Advisor Bot v4 -- tambah command /odds buat lookup odds langsung
+=======================================================================
+Semua fitur hedge advisor v3 tetap ada (kirim posisi | Sisi | Odds,
+bot diem sampai edge threshold tercapai). DITAMBAH command baru:
 
-CATATAN: script ini HARUS jalan di dalam repo GitHub yang PUBLIC,
-karena GitHub Actions cuma gratis UNLIMITED buat repo public. Repo
-private cuma dapet jatah 2000 menit/bulan gratis -- gak akan cukup
-buat jalan 24/7.
+  /odds Home vs Away
 
-Karena repo-nya public, JANGAN taro API key/token langsung di kode.
-Semua rahasia (ODDS_API_KEY, TELEGRAM_BOT_TOKEN) dibaca dari GitHub
-Secrets, bukan ditulis di file ini.
+Bot bakal cari match itu di football & basketball, terus balikin:
+  - Basketball -> Menang/kalah (moneyline) + Handicap (point spread)
+  - Football   -> W1/Tie/W2 (1X2) + Over/Under total gol
+
+Sama seperti v3, dirancang buat jalan di GitHub Actions (public repo),
+baca ODDS_API_KEY & TELEGRAM_BOT_TOKEN dari environment/GitHub Secrets.
 """
 
 import os
@@ -36,12 +33,12 @@ SPORTS = ["football", "basketball"]
 STATUS_FILTER = "pending,live"
 
 FUZZY_MATCH_THRESHOLD = 0.6
-STATE_FILE = "state.json"  # disimpen di root repo, di-commit balik tiap sesi
+STATE_FILE = "state.json"
 DEFAULT_THRESHOLD_PERCENT = 6
 
-TELEGRAM_POLL_SECONDS = 4          # cek pesan Telegram tiap 4 detik
-ODDS_CHECK_INTERVAL_SECONDS = 60   # cek odds tiap 1 menit
-MAX_RUNTIME_SECONDS = 5 * 3600 + 50 * 60  # 5 jam 50 menit -> keluar sebelum limit 6 jam
+TELEGRAM_POLL_SECONDS = 4
+ODDS_CHECK_INTERVAL_SECONDS = 60
+MAX_RUNTIME_SECONDS = 5 * 3600 + 50 * 60
 
 # ======================================
 
@@ -51,11 +48,9 @@ def load_state():
         with open(STATE_FILE, "r") as f:
             return json.load(f)
     return {
-        "chat_id": None,
-        "last_update_id": 0,
+        "chat_id": None, "last_update_id": 0,
         "default_threshold": DEFAULT_THRESHOLD_PERCENT,
-        "positions": [],
-        "last_odds_check": 0,
+        "positions": [], "last_odds_check": 0,
     }
 
 
@@ -84,39 +79,8 @@ def send_telegram_message(chat_id, text):
         print(f"[ERROR] Kirim gagal: {e}")
 
 
-def parse_position_line(line, default_threshold):
-    parts = [p.strip() for p in line.split("|")]
-    if len(parts) < 3:
-        return None
-
-    match_part, side_part, odds_part = parts[0], parts[1], parts[2]
-    threshold = float(parts[3]) if len(parts) > 3 else default_threshold
-
-    teams = re.split(r"\s+vs\.?\s+|\s+v\s+|\s+-\s+", match_part, flags=re.IGNORECASE)
-    if len(teams) != 2:
-        return None
-    home, away = teams[0].strip(), teams[1].strip()
-
-    try:
-        held_odds = float(odds_part)
-    except ValueError:
-        return None
-
-    totals_match = re.match(r"(over|under)\s+([\d.]+)", side_part, flags=re.IGNORECASE)
-    if totals_match:
-        market = "totals"
-        held_side = totals_match.group(1).capitalize()
-        point = float(totals_match.group(2))
-    else:
-        market = "h2h"
-        held_side = side_part
-        point = None
-
-    return {
-        "home": home, "away": away, "market": market, "held_side": held_side,
-        "point": point, "held_odds": held_odds, "threshold": threshold,
-        "notified": False, "created_at": datetime.now(timezone.utc).isoformat(),
-    }
+def name_similarity(a, b):
+    return difflib.SequenceMatcher(None, a.lower(), b.lower()).ratio()
 
 
 def fetch_events(sport):
@@ -147,8 +111,138 @@ def fetch_event_odds(event_id):
         return None
 
 
-def name_similarity(a, b):
-    return difflib.SequenceMatcher(None, a.lower(), b.lower()).ratio()
+def find_match_across_sports(home_query, away_query):
+    """
+    Cari event yang paling cocok di SEMUA sport (football & basketball).
+    Return (event, sport) atau (None, None) kalau gak ketemu.
+    """
+    best_event, best_sport, best_score = None, None, 0
+    for sport in SPORTS:
+        for ev in fetch_events(sport):
+            score = (name_similarity(home_query, ev.get("home", "")) +
+                     name_similarity(away_query, ev.get("away", ""))) / 2
+            if score > best_score:
+                best_score, best_event, best_sport = score, ev, sport
+    if best_score >= FUZZY_MATCH_THRESHOLD:
+        return best_event, best_sport
+    return None, None
+
+
+def format_basketball_odds(odds_response):
+    """
+    Format: Menang/kalah (Match Winner) + Handicap (point spread) per bookmaker.
+    """
+    home, away = odds_response.get("home", "?"), odds_response.get("away", "?")
+    lines = [f"🏀 <b>{home} vs {away}</b>"]
+
+    bookmakers = odds_response.get("bookmakers", {})
+    for bk_name, markets in bookmakers.items():
+        lines.append(f"\n<b>{bk_name}</b>")
+        for market in markets:
+            name = (market.get("name") or "")
+            name_lower = name.lower()
+
+            if "winner" in name_lower or "moneyline" in name_lower:
+                for entry in market.get("odds", []):
+                    h, a = entry.get("home"), entry.get("away")
+                    if h is not None and a is not None:
+                        lines.append(f"  Menang/Kalah: {home} {h} | {away} {a}")
+
+            elif "handicap" in name_lower or "spread" in name_lower:
+                for entry in market.get("odds", []):
+                    hdp, h, a = entry.get("hdp"), entry.get("home"), entry.get("away")
+                    if hdp is not None and h is not None and a is not None:
+                        lines.append(f"  Handicap {hdp}: {home} {h} | {away} {a}")
+
+    if len(lines) == 1:
+        lines.append("(Belum ada data odds tersedia buat match ini)")
+    return "\n".join(lines)
+
+
+def format_football_odds(odds_response):
+    """
+    Format: W1/Tie/W2 (1X2) + Over/Under total gol per bookmaker.
+    """
+    home, away = odds_response.get("home", "?"), odds_response.get("away", "?")
+    lines = [f"⚽ <b>{home} vs {away}</b>"]
+
+    bookmakers = odds_response.get("bookmakers", {})
+    for bk_name, markets in bookmakers.items():
+        lines.append(f"\n<b>{bk_name}</b>")
+        for market in markets:
+            name = (market.get("name") or "")
+            name_lower = name.lower()
+
+            if "1x2" in name_lower or "winner" in name_lower or "moneyline" in name_lower:
+                for entry in market.get("odds", []):
+                    h, d, a = entry.get("home"), entry.get("draw"), entry.get("away")
+                    if h is not None and a is not None:
+                        draw_txt = f" | Tie {d}" if d is not None else ""
+                        lines.append(f"  W1 (menang {home}) {h}{draw_txt} | W2 (menang {away}) {a}")
+
+            elif "over" in name_lower or "total" in name_lower:
+                for entry in market.get("odds", []):
+                    hdp, o, u = entry.get("hdp"), entry.get("over"), entry.get("under")
+                    if hdp is not None and o is not None and u is not None:
+                        lines.append(f"  Total gol {hdp}: Over {o} | Under {u}")
+
+    if len(lines) == 1:
+        lines.append("(Belum ada data odds tersedia buat match ini)")
+    return "\n".join(lines)
+
+
+def handle_odds_command(chat_id, query_text):
+    teams = re.split(r"\s+vs\.?\s+|\s+v\s+|\s+-\s+", query_text.strip(), flags=re.IGNORECASE)
+    if len(teams) != 2:
+        send_telegram_message(chat_id, "Format: /odds Home vs Away")
+        return
+
+    home_query, away_query = teams[0].strip(), teams[1].strip()
+    event, sport = find_match_across_sports(home_query, away_query)
+
+    if not event:
+        send_telegram_message(chat_id, f"Match '{query_text}' gak ketemu di football atau basketball.")
+        return
+
+    odds_response = fetch_event_odds(event["id"])
+    if not odds_response:
+        send_telegram_message(chat_id, "Ketemu match-nya, tapi gagal ambil data odds. Coba lagi bentar.")
+        return
+
+    if sport == "basketball":
+        msg = format_basketball_odds(odds_response)
+    else:
+        msg = format_football_odds(odds_response)
+
+    send_telegram_message(chat_id, msg)
+
+
+# ---------- Bagian hedge advisor (sama seperti v3) ----------
+
+def parse_position_line(line, default_threshold):
+    parts = [p.strip() for p in line.split("|")]
+    if len(parts) < 3:
+        return None
+    match_part, side_part, odds_part = parts[0], parts[1], parts[2]
+    threshold = float(parts[3]) if len(parts) > 3 else default_threshold
+    teams = re.split(r"\s+vs\.?\s+|\s+v\s+|\s+-\s+", match_part, flags=re.IGNORECASE)
+    if len(teams) != 2:
+        return None
+    home, away = teams[0].strip(), teams[1].strip()
+    try:
+        held_odds = float(odds_part)
+    except ValueError:
+        return None
+    totals_match = re.match(r"(over|under)\s+([\d.]+)", side_part, flags=re.IGNORECASE)
+    if totals_match:
+        market, held_side, point = "totals", totals_match.group(1).capitalize(), float(totals_match.group(2))
+    else:
+        market, held_side, point = "h2h", side_part, None
+    return {
+        "home": home, "away": away, "market": market, "held_side": held_side,
+        "point": point, "held_odds": held_odds, "threshold": threshold,
+        "notified": False, "created_at": datetime.now(timezone.utc).isoformat(),
+    }
 
 
 def find_matching_event(pos, events):
@@ -176,7 +270,6 @@ def resolve_held_and_hedge_team(pos):
 def find_best_hedge_odds(odds_response, pos):
     bookmakers = odds_response.get("bookmakers", {})
     best_odds, best_bookmaker = None, None
-
     if pos["market"] == "totals":
         target_field = "under" if pos["held_side"].lower() == "over" else "over"
         for bk_name, markets in bookmakers.items():
@@ -215,7 +308,6 @@ def find_best_hedge_odds(odds_response, pos):
                         continue
                     if best_odds is None or price > best_odds:
                         best_odds, best_bookmaker = price, bk_name
-
     return best_odds, best_bookmaker
 
 
@@ -233,7 +325,6 @@ def check_positions(state):
         return
     events_by_sport = {sport: fetch_events(sport) for sport in SPORTS}
     all_events = [ev for evs in events_by_sport.values() for ev in evs]
-
     for pos in state["positions"]:
         if pos["notified"]:
             continue
@@ -273,14 +364,26 @@ def handle_incoming_message(state, message):
 
     if text == "/help":
         send_telegram_message(chat_id,
+            "<b>Hedge advisor:</b>\n"
             "Kirim posisi, format:\n"
             "Lakers vs Celtics | Over 220.5 | 1.90\n"
-            "Lakers vs Celtics | Home | 1.85\n\n"
-            "Opsional tambah threshold custom di akhir:\n"
-            "Lakers vs Celtics | Over 220.5 | 1.90 | 7\n\n"
-            "/positions - lihat semua posisi\n"
-            "/clear - hapus semua\n"
+            "Lakers vs Celtics | Home | 1.85\n"
+            "(Opsional tambah threshold di akhir: | 7)\n\n"
+            "<b>Lookup odds langsung:</b>\n"
+            "/odds Home vs Away\n"
+            "-> Basketball: menang/kalah + handicap\n"
+            "-> Football: W1/Tie/W2 + Over/Under gol\n\n"
+            "/positions - lihat posisi hedge yang dipantau\n"
+            "/clear - hapus semua posisi\n"
             "/threshold N - ubah threshold default (persen)")
+        return
+
+    if text.startswith("/odds"):
+        query = text[len("/odds"):].strip()
+        if not query:
+            send_telegram_message(chat_id, "Format: /odds Home vs Away")
+        else:
+            handle_odds_command(chat_id, query)
         return
 
     if text == "/positions":
@@ -318,7 +421,7 @@ def handle_incoming_message(state, message):
             added += 1
     if added:
         send_telegram_message(chat_id, f"{added} posisi ditambahkan. Bot bakal notif kalau edge >= threshold masing-masing.")
-    else:
+    elif text and not text.startswith("/"):
         send_telegram_message(chat_id, "Gak kebaca sebagai posisi. Ketik /help buat lihat formatnya.")
 
 
@@ -345,7 +448,7 @@ def main():
 
         time.sleep(TELEGRAM_POLL_SECONDS)
 
-    print("[INFO] Mendekati limit waktu GitHub Actions, sesi ini selesai. Sesi baru bakal lanjut otomatis.")
+    print("[INFO] Mendekati limit waktu GitHub Actions, sesi ini selesai.")
     save_state(state)
 
 
