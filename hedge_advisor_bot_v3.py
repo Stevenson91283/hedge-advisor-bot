@@ -128,31 +128,86 @@ def find_match_across_sports(home_query, away_query):
     return None, None
 
 
+EXCLUDE_KEYWORDS = ["half", "1st", "2nd", "3rd", "4th", "quarter", "period",
+                    "corner", "card", "booking", "team total", "asian total"]
+
+
+def is_main_market(name_lower):
+    """Buang market yang bukan full-match utama (babak 1, corner, kartu, dll)."""
+    return not any(kw in name_lower for kw in EXCLUDE_KEYWORDS)
+
+
+def is_half_line(hdp):
+    """Cuma line .5 biasa (0.5, 1.5, 2.5, dst) -- buang quarter line (.25/.75)."""
+    if hdp is None:
+        return False
+    frac = abs(hdp) % 1
+    return abs(frac - 0.5) < 1e-6
+
+
+def best_under_2(entries, field, half_line_only=False):
+    """
+    Dari semua entry odds, ambil yang harganya di field tersebut PALING BAGUS
+    (paling tinggi) tapi masih di bawah 2.00. Kalau gak ada yang di bawah 2,
+    fallback ke yang paling deket ke 2.00.
+    """
+    candidates = []
+    for entry in entries:
+        if half_line_only and not is_half_line(entry.get("hdp")):
+            continue
+        val = entry.get(field)
+        if val is None:
+            continue
+        try:
+            price = float(val)
+        except (TypeError, ValueError):
+            continue
+        candidates.append((price, entry))
+
+    if not candidates:
+        return None
+
+    under_2 = [c for c in candidates if c[0] < 2.0]
+    if under_2:
+        return max(under_2, key=lambda c: c[0])
+    return min(candidates, key=lambda c: abs(c[0] - 2.0))
+
+
 def format_basketball_odds(odds_response):
     """
-    Format: Menang/kalah (Match Winner) + Handicap (point spread) per bookmaker.
+    Format ringkas: Menang/kalah + 1 handicap line terbaik (odds < 2), per bookmaker.
     """
     home, away = odds_response.get("home", "?"), odds_response.get("away", "?")
     lines = [f"🏀 <b>{home} vs {away}</b>"]
 
     bookmakers = odds_response.get("bookmakers", {})
     for bk_name, markets in bookmakers.items():
-        lines.append(f"\n<b>{bk_name}</b>")
+        bk_lines = []
+        winner_entries, handicap_entries = [], []
+
         for market in markets:
-            name = (market.get("name") or "")
-            name_lower = name.lower()
-
+            name_lower = (market.get("name") or "").lower()
+            if not is_main_market(name_lower):
+                continue
             if "winner" in name_lower or "moneyline" in name_lower:
-                for entry in market.get("odds", []):
-                    h, a = entry.get("home"), entry.get("away")
-                    if h is not None and a is not None:
-                        lines.append(f"  Menang/Kalah: {home} {h} | {away} {a}")
-
+                winner_entries.extend(market.get("odds", []))
             elif "handicap" in name_lower or "spread" in name_lower:
-                for entry in market.get("odds", []):
-                    hdp, h, a = entry.get("hdp"), entry.get("home"), entry.get("away")
-                    if hdp is not None and h is not None and a is not None:
-                        lines.append(f"  Handicap {hdp}: {home} {h} | {away} {a}")
+                handicap_entries.extend(market.get("odds", []))
+
+        if winner_entries:
+            e = winner_entries[0]
+            h, a = e.get("home"), e.get("away")
+            if h is not None and a is not None:
+                bk_lines.append(f"  Menang/Kalah: {home} {h} | {away} {a}")
+
+        best_home = best_under_2(handicap_entries, "home", half_line_only=True)
+        if best_home:
+            price, entry = best_home
+            bk_lines.append(f"  Handicap {entry.get('hdp')}: {home} {price} | {away} {entry.get('away')}")
+
+        if bk_lines:
+            lines.append(f"\n<b>{bk_name}</b>")
+            lines.extend(bk_lines)
 
     if len(lines) == 1:
         lines.append("(Belum ada data odds tersedia buat match ini)")
@@ -161,30 +216,45 @@ def format_basketball_odds(odds_response):
 
 def format_football_odds(odds_response):
     """
-    Format: W1/Tie/W2 (1X2) + Over/Under total gol per bookmaker.
+    Format ringkas: W1/Tie/W2 + 1 Over line terbaik + 1 Under line terbaik
+    (odds < 2), per bookmaker -- bukan semua line total gol.
     """
     home, away = odds_response.get("home", "?"), odds_response.get("away", "?")
     lines = [f"⚽ <b>{home} vs {away}</b>"]
 
     bookmakers = odds_response.get("bookmakers", {})
     for bk_name, markets in bookmakers.items():
-        lines.append(f"\n<b>{bk_name}</b>")
+        bk_lines = []
+        winner_entries, totals_entries = [], []
+
         for market in markets:
-            name = (market.get("name") or "")
-            name_lower = name.lower()
-
+            name_lower = (market.get("name") or "").lower()
+            if not is_main_market(name_lower):
+                continue
             if "1x2" in name_lower or "winner" in name_lower or "moneyline" in name_lower:
-                for entry in market.get("odds", []):
-                    h, d, a = entry.get("home"), entry.get("draw"), entry.get("away")
-                    if h is not None and a is not None:
-                        draw_txt = f" | Tie {d}" if d is not None else ""
-                        lines.append(f"  W1 (menang {home}) {h}{draw_txt} | W2 (menang {away}) {a}")
-
+                winner_entries.extend(market.get("odds", []))
             elif "over" in name_lower or "total" in name_lower:
-                for entry in market.get("odds", []):
-                    hdp, o, u = entry.get("hdp"), entry.get("over"), entry.get("under")
-                    if hdp is not None and o is not None and u is not None:
-                        lines.append(f"  Total gol {hdp}: Over {o} | Under {u}")
+                totals_entries.extend(market.get("odds", []))
+
+        if winner_entries:
+            e = winner_entries[0]
+            h, d, a = e.get("home"), e.get("draw"), e.get("away")
+            if h is not None and a is not None:
+                draw_txt = f" | Tie {d}" if d is not None else ""
+                bk_lines.append(f"  W1 (menang {home}) {h}{draw_txt} | W2 (menang {away}) {a}")
+
+        best_over = best_under_2(totals_entries, "over", half_line_only=True)
+        best_under = best_under_2(totals_entries, "under", half_line_only=True)
+        if best_over:
+            price, entry = best_over
+            bk_lines.append(f"  Over terbaik: {price} @ total {entry.get('hdp')} gol")
+        if best_under:
+            price, entry = best_under
+            bk_lines.append(f"  Under terbaik: {price} @ total {entry.get('hdp')} gol")
+
+        if bk_lines:
+            lines.append(f"\n<b>{bk_name}</b>")
+            lines.extend(bk_lines)
 
     if len(lines) == 1:
         lines.append("(Belum ada data odds tersedia buat match ini)")
