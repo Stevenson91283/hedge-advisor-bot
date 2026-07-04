@@ -32,7 +32,7 @@ jobs:
         env:
           ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          BOOKMAKERS: "1xBet,Betfair Exchange"
+          BOOKMAKERS: "1xbet,Betfair Exchange"
         run: python3 -u hedge_advisor_bot_v3.py
 
       - name: Commit & push state.json
